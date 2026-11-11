@@ -158,7 +158,7 @@ export function TodosScreen() {
   };
 
   return (
-    <Screen testID={TESTID.todos.screen} padded={false}>
+    <Screen testID={TESTID.todos.screen} padded={false} topInset={false}>
       <View style={{ gap: tokens.spacing.sm, padding: tokens.spacing.md }}>
         <OfflineBanner />
         {/* Remote-config demo: server-controlled notice banner. */}

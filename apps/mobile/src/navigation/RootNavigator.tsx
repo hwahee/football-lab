@@ -1,12 +1,15 @@
 /**
- * Route table: bottom tabs (Todos / Settings) inside a root stack. The
- * design-system gallery screen is registered in DEV builds only.
+ * Route table. The app opens on the game (`Game`); everything else — the
+ * boilerplate's Todos / Settings tabs — sits one level down in `Main`, reached
+ * from the gear button on the game's scoreboard and left with the header's
+ * back button. The design-system gallery is registered in DEV builds only.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import { env } from '../config/env';
+import { GameScreen } from '../game/GameScreen';
 import { useLocale } from '../i18n/LocaleProvider';
 import { useTheme } from '../theme/ThemeProvider';
 import { DesignSystemScreen } from '../screens/DesignSystemScreen';
@@ -63,8 +66,14 @@ function MainTabs() {
 export function RootNavigator() {
   const { t } = useLocale();
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="Main" component={MainTabs} />
+    <Stack.Navigator initialRouteName="Game" screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="Game" component={GameScreen} />
+      <Stack.Screen
+        name="Main"
+        component={MainTabs}
+        // The header is the way back to the game.
+        options={{ headerShown: true, title: t('game.settings'), headerBackTitle: t('game.title') }}
+      />
       {env.isDev ? (
         <Stack.Screen
           name="DesignSystem"
