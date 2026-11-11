@@ -43,18 +43,19 @@
 
 전체 목록은 `apps/mobile/src/testing/testids.ts`가 소스 오브 트루스입니다. 주요 항목:
 
-| 영역          | testID                                                                                                               |
-| ------------- | -------------------------------------------------------------------------------------------------------------------- |
-| 부트/광고     | `boot.screen`, `boot.ad.slot`, `boot.ad.skip`                                                                        |
-| 점검/업데이트 | `maintenance.screen`/`.retry`, `update.force.screen`/`.store-button`, `update.prompt.*`                              |
-| 탭            | `tabs.todos`, `tabs.settings`                                                                                        |
-| Todos 생성    | `todos.create.input` / `.submit` (+ `todos.create.input.error`)                                                      |
-| Todos 목록    | `todos.list`, `todos.item.<id>`, `todos.item.<id>.toggle`, `todos.item.<id>.delete`                                  |
-| Todos 상태    | `todos.loading`, `todos.error`, `todos.error.retry`, `todos.empty`, `todos.footer.loading`                           |
-| 필터          | `todos.filter.all` / `.open` / `.done`                                                                               |
-| 설정          | `settings.locale.*`, `settings.theme.*`, `settings.design.*`, `settings.check-update`, `settings.design-system-link` |
-| 배너          | `notice.banner`, `offline.banner`                                                                                    |
-| 디자인 시스템 | `design-system.screen`, `design-system.section.<name>`, `ds.*`                                                       |
+| 영역          | testID                                                                                                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 부트/광고     | `boot.screen`, `boot.ad.slot`, `boot.ad.skip`                                                                                                                       |
+| 점검/업데이트 | `maintenance.screen`/`.retry`, `update.force.screen`/`.store-button`, `update.prompt.*`                                                                             |
+| 게임          | `game.screen`, `game.field`, `game.settings`, `game.menu.*`, `game.play.<id>`, `game.option.*`, `game.player.<role>`, `game.start`, `game.live`, `game.result.next` |
+| 탭            | `tabs.todos`, `tabs.settings`                                                                                                                                       |
+| Todos 생성    | `todos.create.input` / `.submit` (+ `todos.create.input.error`)                                                                                                     |
+| Todos 목록    | `todos.list`, `todos.item.<id>`, `todos.item.<id>.toggle`, `todos.item.<id>.delete`                                                                                 |
+| Todos 상태    | `todos.loading`, `todos.error`, `todos.error.retry`, `todos.empty`, `todos.footer.loading`                                                                          |
+| 필터          | `todos.filter.all` / `.open` / `.done`                                                                                                                              |
+| 설정          | `settings.locale.*`, `settings.theme.*`, `settings.design.*`, `settings.check-update`, `settings.design-system-link`                                                |
+| 배너          | `notice.banner`, `offline.banner`                                                                                                                                   |
+| 디자인 시스템 | `design-system.screen`, `design-system.section.<name>`, `ds.*`                                                                                                      |
 
 `TextField`는 에러 표시 시 자동으로 `` `${testID}.error` `` 요소를 추가합니다. `TextArea`도 같고,
 힌트(글자 수 등)가 있으면 `` `${testID}.hint` ``를 더합니다.

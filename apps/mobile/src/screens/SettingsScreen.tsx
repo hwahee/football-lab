@@ -99,7 +99,7 @@ export function SettingsScreen() {
   };
 
   return (
-    <Screen testID={TESTID.settings.screen} padded={false}>
+    <Screen testID={TESTID.settings.screen} padded={false} topInset={false}>
       <ScrollView contentContainerStyle={{ padding: tokens.spacing.md, gap: tokens.spacing.md }}>
         <AppText variant="title">{t('settings.title')}</AppText>
 

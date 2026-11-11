@@ -20,6 +20,9 @@ export type MainTabParamList = {
 };
 
 export type RootStackParamList = {
+  /** The football game — what the app opens on. */
+  Game: undefined;
+  /** Everything that is not the game (todos, settings), behind the game's gear button. */
   Main: NavigatorScreenParams<MainTabParamList>;
   /** Design-system gallery — registered in dev builds only. */
   DesignSystem: undefined;

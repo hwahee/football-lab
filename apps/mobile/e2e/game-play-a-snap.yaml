@@ -1,0 +1,42 @@
+# The game: kick off against the AI, call a play, START, and see the result.
+# Run with: maestro test apps/mobile/e2e/game-play-a-snap.yaml
+appId: com.example.mobileboilerplate.dev
+---
+- launchApp
+- runFlow:
+    when:
+      visible:
+        id: 'boot.ad.skip'
+    commands:
+      - tapOn:
+          id: 'boot.ad.skip'
+- extendedWaitUntil:
+    visible:
+      id: 'game.screen'
+    timeout: 15000
+- tapOn:
+    id: 'game.menu.mode.ai'
+- tapOn:
+    id: 'game.menu.kickoff'
+# Whoever won the toss, the human gets a board ending in START.
+- assertVisible:
+    id: 'game.start'
+- tapOn:
+    id: 'game.tab.place'
+- tapOn:
+    id: 'game.tab.play'
+- tapOn:
+    id: 'game.start'
+# From here there is nothing to press until the play is decided.
+- assertVisible:
+    id: 'game.live'
+- assertNotVisible:
+    id: 'game.start'
+- extendedWaitUntil:
+    visible:
+      id: 'game.result.next'
+    timeout: 30000
+- tapOn:
+    id: 'game.result.next'
+- assertVisible:
+    id: 'game.start'
