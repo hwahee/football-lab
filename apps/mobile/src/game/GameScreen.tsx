@@ -680,6 +680,7 @@ function FinalBoard({ game, state }: { game: GameSession; state: GameState }) {
 
 export function GameScreen() {
   const game = useGameSession();
+  const { t } = useLocale();
   const insets = useSafeAreaInsets();
   const { height } = useWindowDimensions();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -710,6 +711,7 @@ export function GameScreen() {
         <FieldView
           testID={TESTID.game.field}
           getFrame={game.getFrame}
+          unsupportedMessage={t('game.field.unsupported')}
           onTouch={settingUp ? game.fieldTouch : undefined}
         />
         {state &&

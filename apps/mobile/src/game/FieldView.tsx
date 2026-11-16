@@ -10,8 +10,8 @@
  * its way to the screen, so a running play does not re-render the UI.
  */
 import { GLView, type ExpoWebGLRenderingContext } from 'expo-gl';
-import { useCallback, useEffect, useRef } from 'react';
-import { View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Text, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
 import { WebGLRenderer } from 'three';
 
 import { FieldScene, type SceneFrame } from './render/scene';
@@ -22,6 +22,8 @@ export interface FieldViewProps {
   testID: string;
   /** Called once per rendered frame with the seconds since the last one. */
   getFrame: (dt: number) => SceneFrame;
+  /** Shown instead of the field when the device cannot render it. */
+  unsupportedMessage: string;
   /** Touches, as ground points in world space. Omit to make the field inert. */
   onTouch?: (phase: FieldTouchPhase, world: { x: number; z: number }) => void;
 }
@@ -33,7 +35,12 @@ export interface FieldViewProps {
 type FieldGL = ExpoWebGLRenderingContext & {
   readonly drawingBufferWidth: number;
   readonly drawingBufferHeight: number;
+  /** A WebGL 2 method — its presence is how a WebGL 2 context is recognized. */
+  readonly createVertexArray?: unknown;
 };
+
+/** Thrown when the device only offers OpenGL ES 2 (three.js needs WebGL 2). */
+class WebGL2Unavailable extends Error {}
 
 function createRenderer(gl: FieldGL): WebGLRenderer {
   const canvas = {
@@ -46,17 +53,34 @@ function createRenderer(gl: FieldGL): WebGLRenderer {
     removeEventListener: () => undefined,
     getContext: () => gl,
   };
-  const renderer = new WebGLRenderer({
-    canvas: canvas as unknown as HTMLCanvasElement,
-    context: gl,
-    antialias: true,
-  });
+  if (typeof gl.createVertexArray !== 'function') throw new WebGL2Unavailable();
+
+  // three.js refuses any context that is `instanceof WebGLRenderingContext`
+  // ("WebGL 1 is not supported since r163"). In browsers a WebGL 2 context is
+  // not one, but expo-gl's native side has shipped builds where its WebGL 2
+  // class inherits from the WebGL 1 class, so a perfectly good WebGL 2 context
+  // trips that check on a device. We have just verified the context ourselves,
+  // so hide the global for the duration of the constructor.
+  const scope = globalThis as { WebGLRenderingContext?: unknown };
+  const hidden = scope.WebGLRenderingContext;
+  let renderer: WebGLRenderer;
+  try {
+    scope.WebGLRenderingContext = undefined;
+    renderer = new WebGLRenderer({
+      canvas: canvas as unknown as HTMLCanvasElement,
+      context: gl,
+      antialias: true,
+    });
+  } finally {
+    scope.WebGLRenderingContext = hidden;
+  }
   renderer.setPixelRatio(1);
   renderer.setSize(gl.drawingBufferWidth, gl.drawingBufferHeight, false);
   return renderer;
 }
 
-export function FieldView({ testID, getFrame, onTouch }: FieldViewProps) {
+export function FieldView({ testID, getFrame, onTouch, unsupportedMessage }: FieldViewProps) {
+  const [failure, setFailure] = useState<string | null>(null);
   const sceneRef = useRef<FieldScene | null>(null);
   const frameRequest = useRef<number | null>(null);
   const size = useRef({ width: 1, height: 1 });
@@ -75,7 +99,14 @@ export function FieldView({ testID, getFrame, onTouch }: FieldViewProps) {
 
   const onContextCreate = useCallback((context: ExpoWebGLRenderingContext) => {
     const gl = context as FieldGL;
-    const renderer = createRenderer(gl);
+    let renderer: WebGLRenderer;
+    try {
+      renderer = createRenderer(gl);
+    } catch (error) {
+      // A field that cannot be drawn must not take the whole app down.
+      setFailure(error instanceof WebGL2Unavailable ? '' : String(error));
+      return;
+    }
     const scene = new FieldScene();
     sceneRef.current = scene;
     let bufferWidth = 0;
@@ -131,6 +162,27 @@ export function FieldView({ testID, getFrame, onTouch }: FieldViewProps) {
       onResponderRelease={(event) => touch('end', event)}
       onResponderTerminate={(event) => touch('end', event)}
     >
+      {failure !== null ? (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            bottom: 0,
+            left: 0,
+            zIndex: 1,
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+            backgroundColor: '#070b14',
+          }}
+        >
+          <Text style={{ color: '#f2f6ff', textAlign: 'center' }}>
+            {unsupportedMessage}
+            {failure ? `\n\n${failure}` : ''}
+          </Text>
+        </View>
+      ) : null}
       {/* The GL surface must not swallow the touches the wrapper handles. */}
       <View style={{ flex: 1 }} pointerEvents="none">
         <GLView style={{ flex: 1 }} msaaSamples={4} onContextCreate={onContextCreate} />

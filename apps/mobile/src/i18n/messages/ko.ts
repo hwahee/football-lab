@@ -103,6 +103,7 @@ export const ko: Record<MessageKey, string> = {
   // ── football game (src/game) ─────────────────────────────────────────────
   'game.title': '풋볼 랩',
   'game.subtitle': '7인제 미식축구 지략 대결',
+  'game.field.unsupported': '이 기기에서는 3D 필드를 그릴 수 없습니다 (WebGL 2 필요).',
   'game.settings': '설정',
   'game.team.home': '블루',
   'game.team.away': '레드',

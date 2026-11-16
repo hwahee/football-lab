@@ -114,6 +114,7 @@ export const en = {
   // ── football game (src/game) ─────────────────────────────────────────────
   'game.title': 'FOOTBALL LAB',
   'game.subtitle': '7-on-7 coaching duel',
+  'game.field.unsupported': 'This device cannot draw the 3D field (WebGL 2 is required).',
   'game.settings': 'Settings',
   'game.team.home': 'BLUE',
   'game.team.away': 'RED',
