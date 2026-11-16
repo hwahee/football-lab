@@ -14,10 +14,17 @@ appId: com.example.mobileboilerplate.dev
     commands:
       - tapOn:
           id: 'boot.ad.skip'
+# The app opens on the game; everything else is behind its gear button.
 - extendedWaitUntil:
     visible:
-      id: 'todos.screen'
+      id: 'game.screen'
     timeout: 15000
+- tapOn:
+    id: 'game.settings'
+- tapOn:
+    id: 'tabs.todos'
+- assertVisible:
+    id: 'todos.screen'
 
 # Create
 - tapOn:

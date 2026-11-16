@@ -1,9 +1,9 @@
 /**
  * Dynamic Expo app config — ONE switch (APP_ENV) selects the build profile.
  *
- *   APP_ENV=development  (default)  → "Boiler (Dev)",  com.example.mobileboilerplate.dev
- *   APP_ENV=staging                 → "Boiler (Stg)",  com.example.mobileboilerplate.stg
- *   APP_ENV=production              → "Boiler",        com.example.mobileboilerplate
+ *   APP_ENV=development  (default)  → "Football Lab (Dev)",  com.example.mobileboilerplate.dev
+ *   APP_ENV=staging                 → "Football Lab (Stg)",  com.example.mobileboilerplate.stg
+ *   APP_ENV=production              → "Football Lab",        com.example.mobileboilerplate
  *
  * Distinct bundle ids / package names let all three environments install
  * side-by-side on one device. EAS build profiles set APP_ENV (see eas.json).
@@ -62,19 +62,19 @@ interface Profile {
 
 const PROFILES: Record<AppEnv, Profile> = {
   development: {
-    name: 'Boiler (Dev)',
+    name: 'Football Lab (Dev)',
     scheme: 'mobileboilerplate-dev',
     bundleIdSuffix: '.dev',
     apiBaseUrl: null,
   },
   staging: {
-    name: 'Boiler (Stg)',
+    name: 'Football Lab (Stg)',
     scheme: 'mobileboilerplate-stg',
     bundleIdSuffix: '.stg',
     apiBaseUrl: 'https://api-staging.example.com',
   },
   production: {
-    name: 'Boiler',
+    name: 'Football Lab',
     scheme: 'mobileboilerplate',
     bundleIdSuffix: '',
     apiBaseUrl: 'https://api.example.com',

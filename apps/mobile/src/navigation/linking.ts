@@ -32,6 +32,7 @@ export const linking: LinkingOptions<RootStackParamList> = {
   ],
   config: {
     screens: {
+      Game: 'game',
       Main: {
         screens: {
           TodosTab: 'todos',

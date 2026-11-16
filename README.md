@@ -372,6 +372,12 @@ SIGTERM/SIGINT 수신 시: ① readiness가 즉시 503으로 바뀌어 LB가 트
 
 ## 모바일 앱 레이어 (`apps/mobile`)
 
+> **이 저장소의 앱은 미식축구 게임입니다.** 앱을 열면 게임(`apps/mobile/src/game`)이 바로 뜨고,
+> 보일러플레이트의 나머지 화면(할 일, 설정, 디자인 시스템 갤러리)은 게임 스코어보드의 톱니바퀴 뒤에
+> 있습니다. 게임 규칙·구조는 [docs/game.md](docs/game.md), 게임 UI 규칙은
+> [docs/game-design-system.md](docs/game-design-system.md)를 보세요. 3D 필드가 `expo-gl`(네이티브 모듈)을
+> 쓰므로 개발 빌드를 새로 만들어야 합니다.
+
 ### 이 레이어의 원칙 — 원본 보일러플레이트 위에 "쌓기"
 
 앱 지원을 위해 원본 구조를 재배치하지 않았습니다. `src/{client,server,shared}`는 그대로
