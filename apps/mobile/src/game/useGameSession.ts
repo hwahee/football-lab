@@ -2,7 +2,7 @@
  * The game session: which phase the match is in, whose turn it is at the
  * controls, and the loop that plays a snap out.
  *
- *   menu → offense → (handover → defense) → presnap → live → result → …→ final
+ *   menu → kickoff → offense → (handover → defense) → presnap → live → result → … → final
  *
  * `presnap` and `live` are the locked phases: once START is pressed the hook
  * exposes no action that changes anything until the play is over.
@@ -12,15 +12,19 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { aiDefense, aiOffense } from './engine/ai';
+import { aiDefense, aiOffense, aiWantsTimeout } from './engine/ai';
 import {
   aiTeam,
   applyOutcome,
   newGame,
   otherTeam,
+  preSnapPenalty,
+  settleClock,
+  snapSpot,
   type GameConfig,
   type GameState,
   type Note,
+  type Stage,
 } from './engine/game';
 import {
   DEFAULT_DEFENSE,
@@ -29,9 +33,10 @@ import {
   isMovable,
   offenseAlignment,
   offsetToward,
+  strengthOf,
 } from './engine/playbook';
 import { createRng, type Rng } from './engine/rng';
-import { SIM_DT, createPlay, stepPlay, type PlaySim } from './engine/sim';
+import { SIM_DT, createKickoff, createPlay, stepPlay, type PlaySim } from './engine/sim';
 import {
   isSpecial,
   type DefRole,
@@ -47,14 +52,22 @@ import {
 import type { SceneFrame } from './render/scene';
 import { fromWorld, idleFrame, pickRole, playFrame, setupFrame, toWorld, type SetupView } from './view'; // prettier-ignore
 
-type Phase = 'menu' | 'offense' | 'handover' | 'defense' | 'presnap' | 'live' | 'result' | 'final';
+type Phase =
+  'menu' | 'kickoff' | 'offense' | 'handover' | 'defense' | 'presnap' | 'live' | 'result' | 'final';
 
-interface LastPlay {
+export interface LastPlay {
+  /** The team that had the ball (or kicked off). */
   offense: TeamId;
-  outcome: PlayOutcome;
+  /** What kind of down it was — a kickoff and a try read differently. */
+  stage: Stage;
+  /** Null when a flag before the snap meant there was no play. */
+  outcome: PlayOutcome | null;
   events: PlayEvent[];
   notes: Note[];
   yards: number;
+  /** A penalty wiped the play out. */
+  nullified: boolean;
+  touchback: boolean;
 }
 
 interface Session {
@@ -69,11 +82,13 @@ interface Session {
   /** Events of the play in progress, as they happen. */
   feed: PlayEvent[];
   last: LastPlay | null;
+  /** What happened between plays (timeout, two-minute warning, end of a quarter…). */
+  notices: Note[];
 }
 
 const INITIAL: Session = {
   phase: 'menu',
-  config: { mode: 'ai', difficulty: 'normal', quarterSeconds: 120 },
+  config: { mode: 'ai', difficulty: 'normal', quarterSeconds: 180 },
   game: null,
   turn: null,
   offCall: DEFAULT_OFFENSE,
@@ -81,6 +96,7 @@ const INITIAL: Session = {
   selected: null,
   feed: [],
   last: null,
+  notices: [],
 };
 
 interface Memory {
@@ -90,6 +106,19 @@ interface Memory {
 
 /** Seconds the final picture is held before the result panel appears. */
 const END_HOLD = 1.1;
+
+/** What the field shows while `game`'s next snap is being set up. */
+function setupView(s: Session, game: GameState): SetupView {
+  return {
+    offense: game.possession,
+    at: snapSpot(game, s.offCall.play),
+    toGo: game.stage === 'scrimmage' ? game.toGo : null,
+    offCall: s.offCall,
+    defCall: s.defCall,
+    reveal: s.phase === 'offense' ? 'offense' : s.phase === 'defense' ? 'defense' : 'none',
+    selected: s.selected,
+  };
+}
 
 export interface GameSession {
   session: Session;
@@ -109,7 +138,8 @@ export interface GameSession {
   lockIn: () => void;
   ready: () => void;
   start: () => void;
-  next: () => void;
+  /** On to the next snap; `timeoutBy` stops the clock first. */
+  next: (timeoutBy?: TeamId) => void;
 }
 
 export function useGameSession(): GameSession {
@@ -127,13 +157,23 @@ export function useGameSession(): GameSession {
     away: { off: DEFAULT_OFFENSE, def: DEFAULT_DEFENSE },
   });
   const presnap = useRef({ t: 0, duration: 0.4, disguise: null as DefenseCall | null });
-  const loop = useRef({ carry: 0, hold: 0, feedCount: 0, done: false, toGo: 10 });
+  const loop = useRef<{
+    carry: number;
+    hold: number;
+    feedCount: number;
+    done: boolean;
+    /** Yards to the line to gain when the play started (null: kickoff or try). */
+    toGo: number | null;
+  }>({ carry: 0, hold: 0, feedCount: 0, done: false, toGo: 10 });
   const dragging = useRef<Role | null>(null);
 
+  /** Sets the board up for the next snap of `game`. */
   const beginDown = useCallback((game: GameState): Partial<Session> => {
+    sim.current = null;
+    if (game.over) return { phase: 'final', turn: null, selected: null };
+    if (game.stage === 'kickoff') return { phase: 'kickoff', turn: null, selected: null };
     const offense = game.possession;
     const defense = otherTeam(offense);
-    sim.current = null;
     if (aiTeam(game) === offense) {
       // The computer has the ball: its formation is on the field, its play is not.
       return {
@@ -145,7 +185,14 @@ export function useGameSession(): GameSession {
       };
     }
     const remembered = memory.current[offense].off;
-    const offCall = isSpecial(remembered.play) ? { ...remembered, play: 'insideRun' as const } : remembered; // prettier-ignore
+    // After a touchdown the default is the kick; otherwise never start on a special play.
+    const play =
+      game.stage === 'try'
+        ? ('extraPoint' as const)
+        : isSpecial(remembered.play)
+          ? ('insideRun' as const)
+          : remembered.play;
+    const offCall = { ...remembered, play };
     memory.current[offense].off = offCall;
     // Until the defense commits, it shows a neutral look.
     return { phase: 'offense', turn: offense, offCall, defCall: DEFAULT_DEFENSE, selected: null };
@@ -164,7 +211,7 @@ export function useGameSession(): GameSession {
         away: { off: DEFAULT_OFFENSE, def: DEFAULT_DEFENSE },
       };
       const game = newGame(s.config, rng.current);
-      return { ...s, game, last: null, feed: [], ...beginDown(game) };
+      return { ...s, game, last: null, feed: [], notices: [], ...beginDown(game) };
     });
   }, [beginDown]);
 
@@ -201,15 +248,23 @@ export function useGameSession(): GameSession {
   const moveTo = useCallback((role: Role, point: Vec) => {
     setSession((s) => {
       if (!s.game || !s.turn || !isMovable(role)) return s;
+      const at = snapSpot(s.game, s.offCall.play);
+      const strong = strengthOf(s.offCall);
       if (s.phase === 'offense') {
-        const offset = offsetToward('off', s.offCall, role, point, s.game.ballOn);
-        const offCall = { ...s.offCall, offsets: { ...s.offCall.offsets, [role as OffRole]: offset } }; // prettier-ignore
+        const offset = offsetToward('off', s.offCall, role, point, at, strong);
+        const offCall = {
+          ...s.offCall,
+          offsets: { ...s.offCall.offsets, [role as OffRole]: offset },
+        };
         memory.current[s.turn].off = offCall;
         return { ...s, offCall };
       }
       if (s.phase === 'defense') {
-        const offset = offsetToward('def', s.defCall, role, point, s.game.ballOn);
-        const defCall = { ...s.defCall, offsets: { ...s.defCall.offsets, [role as DefRole]: offset } }; // prettier-ignore
+        const offset = offsetToward('def', s.defCall, role, point, at, strong);
+        const defCall = {
+          ...s.defCall,
+          offsets: { ...s.defCall.offsets, [role as DefRole]: offset },
+        };
         memory.current[s.turn].def = defCall;
         return { ...s, defCall };
       }
@@ -222,10 +277,11 @@ export function useGameSession(): GameSession {
       const s = latest.current;
       if (!s.game || !s.selected || (s.phase !== 'offense' && s.phase !== 'defense')) return;
       const offense = s.game.possession;
+      const at = snapSpot(s.game, s.offCall.play);
       const spots: Record<string, Vec> =
         s.phase === 'offense'
-          ? offenseAlignment(s.offCall, s.game.ballOn)
-          : defenseAlignment(s.defCall, s.game.ballOn);
+          ? offenseAlignment(s.offCall, at)
+          : defenseAlignment(s.defCall, at, strengthOf(s.offCall));
       const spot = spots[s.selected];
       if (!spot) return;
       const world = toWorld(offense, spot);
@@ -261,16 +317,7 @@ export function useGameSession(): GameSession {
       }
       const point = fromWorld(s.game.possession, world.x, world.z);
       if (phase === 'start') {
-        const view: SetupView = {
-          offense: s.game.possession,
-          ballOn: s.game.ballOn,
-          toGo: s.game.toGo,
-          offCall: s.offCall,
-          defCall: s.defCall,
-          reveal: 'none',
-          selected: null,
-        };
-        const role = pickRole(view, s.phase === 'offense' ? 'off' : 'def', point);
+        const role = pickRole(setupView(s, s.game), s.phase === 'offense' ? 'off' : 'def', point);
         dragging.current = role && isMovable(role) ? role : null;
         if (role) select(role);
         return;
@@ -283,9 +330,49 @@ export function useGameSession(): GameSession {
   const start = useCallback(() => {
     const s = latest.current;
     const game = s.game;
-    if (!game || (s.phase !== 'offense' && s.phase !== 'defense')) return;
+    if (!game) return;
     const offense = game.possession;
     const defense = otherTeam(offense);
+    dragging.current = null;
+
+    if (s.phase === 'kickoff') {
+      sim.current = createKickoff(
+        game.teams[offense],
+        game.teams[defense],
+        game.kickFrom,
+        createRng(rng.current.fork()),
+      );
+      loop.current = { carry: 0, hold: 0, feedCount: 0, done: false, toGo: null };
+      setSession((prev) => ({ ...prev, phase: 'live', selected: null, feed: [], notices: [] }));
+      return;
+    }
+    if (s.phase !== 'offense' && s.phase !== 'defense') return;
+
+    // A flag before the snap: there is no play, just yards.
+    const flag = preSnapPenalty(game, s.offCall.play, rng.current);
+    if (flag) {
+      sim.current = null;
+      setSession((prev) => ({
+        ...prev,
+        phase: 'result',
+        game: flag.state,
+        selected: null,
+        feed: [],
+        notices: [],
+        last: {
+          offense,
+          stage: game.stage,
+          outcome: null,
+          events: [],
+          notes: flag.notes,
+          yards: 0,
+          nullified: true,
+          touchback: false,
+        },
+      }));
+      return;
+    }
+
     let defCall = s.defCall;
     let disguise: DefenseCall | null = null;
     if (s.phase === 'offense') {
@@ -299,19 +386,31 @@ export function useGameSession(): GameSession {
       game.teams[defense],
       s.offCall,
       defCall,
-      game.ballOn,
+      snapSpot(game, s.offCall.play),
       createRng(rng.current.fork()),
     );
     presnap.current = { t: 0, duration: disguise ? 0.9 : 0.4, disguise };
-    loop.current = { carry: 0, hold: 0, feedCount: 0, done: false, toGo: game.toGo };
-    dragging.current = null;
-    setSession((prev) => ({ ...prev, phase: 'presnap', defCall, selected: null, feed: [] }));
+    loop.current = {
+      carry: 0,
+      hold: 0,
+      feedCount: 0,
+      done: false,
+      toGo: game.stage === 'scrimmage' ? game.toGo : null,
+    };
+    setSession((prev) => ({
+      ...prev,
+      phase: 'presnap',
+      defCall,
+      selected: null,
+      feed: [],
+      notices: [],
+    }));
   }, []);
 
   const lockIn = useCallback(() => {
     const s = latest.current;
     if (s.phase !== 'offense') return;
-    // A kick needs no answer from the defense.
+    // A kick or a kneel-down needs no answer from the defense.
     if (isSpecial(s.offCall.play)) start();
     else setSession((prev) => ({ ...prev, phase: 'handover', selected: null }));
   }, [start]);
@@ -324,13 +423,26 @@ export function useGameSession(): GameSession {
     });
   }, []);
 
-  const next = useCallback(() => {
-    setSession((s) => {
-      if (s.phase !== 'result' || !s.game) return s;
-      if (s.game.over) return { ...s, phase: 'final', turn: null };
-      return { ...s, feed: [], ...beginDown(s.game) };
-    });
-  }, [beginDown]);
+  const next = useCallback(
+    (timeoutBy?: TeamId) => {
+      setSession((s) => {
+        if (s.phase !== 'result' || !s.game) return s;
+        // The clock runs between plays unless somebody stops it — the
+        // computer gets the same chance to call timeout as the player.
+        const ai = aiTeam(s.game);
+        const caller = timeoutBy ?? (ai && aiWantsTimeout(s.game, ai) ? ai : null);
+        const settled = settleClock(s.game, caller, rng.current);
+        return {
+          ...s,
+          game: settled.state,
+          notices: settled.notes,
+          feed: [],
+          ...beginDown(settled.state),
+        };
+      });
+    },
+    [beginDown],
+  );
 
   const getFrame = useCallback((dt: number): SceneFrame => {
     const s = latest.current;
@@ -357,7 +469,7 @@ export function useGameSession(): GameSession {
           if (state.hold >= END_HOLD) {
             state.done = true;
             const outcome = play.outcome;
-            const applied = applyOutcome(game, outcome, rng.current);
+            const applied = applyOutcome(game, outcome, rng.current, play);
             setSession((prev) =>
               prev.phase === 'live'
                 ? {
@@ -366,10 +478,13 @@ export function useGameSession(): GameSession {
                     game: applied.state,
                     last: {
                       offense: game.possession,
+                      stage: game.stage,
                       outcome,
                       events: [...play.events],
                       notes: applied.notes,
                       yards: applied.yards,
+                      nullified: applied.nullified,
+                      touchback: play.kickoff?.touchback ?? false,
                     },
                   }
                 : prev,
@@ -382,15 +497,21 @@ export function useGameSession(): GameSession {
       return playFrame(play, offense, state.toGo);
     }
 
-    const view: SetupView = {
-      offense: game.possession,
-      ballOn: game.ballOn,
-      toGo: game.toGo,
-      offCall: s.offCall,
-      defCall: s.defCall,
-      reveal: s.phase === 'offense' ? 'offense' : s.phase === 'defense' ? 'defense' : 'none',
-      selected: s.selected,
-    };
+    if (s.phase === 'kickoff') {
+      // Nothing to line up yet: an empty field around the kicking tee.
+      const frame = idleFrame(DEFAULT_OFFENSE, DEFAULT_DEFENSE);
+      const tee = toWorld(game.possession, { x: 0, y: game.kickFrom });
+      return {
+        ...frame,
+        tokens: [],
+        overlays: [],
+        overlayKey: '',
+        ball: { x: tee.x, z: tee.z, height: 0 },
+        focusZ: tee.z + (game.possession === 'home' ? -8 : 8),
+      };
+    }
+
+    const view = setupView(s, game);
     if (s.phase === 'presnap') {
       const shift = presnap.current;
       shift.t += dt;
@@ -405,7 +526,10 @@ export function useGameSession(): GameSession {
         disguise: shift.disguise ?? s.defCall,
       });
     }
-    return setupFrame(view);
+    // Between plays the board shows the next snap, not the last one.
+    return setupFrame(
+      s.phase === 'result' || s.phase === 'final' ? { ...view, reveal: 'none' } : view,
+    );
   }, []);
 
   return {

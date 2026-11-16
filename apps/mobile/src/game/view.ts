@@ -6,7 +6,16 @@
  * This is the only place that knows which way a team faces: the engine works
  * in the offense's frame, the renderer in world space.
  */
-import { DEF_JOBS, backPath, defenseAlignment, manMatchups, offenseAlignment, receiverRoute } from './engine/playbook'; // prettier-ignore
+import {
+  DEF_JOBS,
+  backPath,
+  defenseAlignment,
+  manMatchups,
+  manTargetOf,
+  offenseAlignment,
+  receiverRoute,
+  strengthOf,
+} from './engine/playbook';
 import type { PlaySim } from './engine/sim';
 import {
   DEF_ROLES,
@@ -17,13 +26,14 @@ import {
   type OffRole,
   type OffenseCall,
   type Role,
+  type Scrimmage,
   type TeamId,
   type Vec,
 } from './engine/types';
 import { PALETTE } from './palette';
 import type { Overlay, SceneFrame, TokenView } from './render/scene';
 
-const BIG: ReadonlySet<Role> = new Set<Role>(['C', 'LG', 'RG', 'DE1', 'NT', 'DE2']);
+const BIG: ReadonlySet<Role> = new Set<Role>(['LT', 'LG', 'C', 'RG', 'RT', 'DE1', 'DT1', 'DT2', 'DE2']); // prettier-ignore
 
 /** Offense-frame point → world (x, z). Home attacks toward -z (up the screen). */
 export function toWorld(offense: TeamId, point: Vec): { x: number; z: number } {
@@ -40,8 +50,10 @@ function other(team: TeamId): TeamId {
 
 export interface SetupView {
   offense: TeamId;
-  ballOn: number;
-  toGo: number;
+  /** Where the ball will be snapped. */
+  at: Scrimmage;
+  /** Yards to the line to gain, or null when there is none (the try). */
+  toGo: number | null;
   offCall: OffenseCall;
   defCall: DefenseCall;
   /** Whose plan is drawn on the turf — nobody's while the device changes hands. */
@@ -59,7 +71,6 @@ function token(
   world: { x: number; z: number },
   extra?: Partial<TokenView>,
 ): TokenView {
-  // prettier-ignore
   return {
     key: `${team}:${role}`,
     team,
@@ -86,14 +97,14 @@ function path(offense: TeamId, points: readonly Vec[], color: string, arrow = tr
 }
 
 function offenseOverlays(view: SetupView, spots: Record<OffRole, Vec>): Overlay[] {
-  const { offense, offCall, ballOn } = view;
+  const { offense, offCall, at } = view;
   if (isSpecial(offCall.play)) return [];
   const overlays: Overlay[] = [];
-  for (const role of ['WR1', 'WR2'] as const) {
-    const route = receiverRoute(offCall, role, spots[role]);
+  for (const role of ['WR1', 'WR2', 'WR3', 'TE'] as const) {
+    const route = receiverRoute(offCall, role, spots[role], at);
     if (route) overlays.push(path(offense, route.points, PALETTE.chalk));
   }
-  const back = backPath(offCall, spots.RB, ballOn);
+  const back = backPath(offCall, spots.RB, at);
   if (back) overlays.push(path(offense, back.points, PALETTE.led));
   return overlays;
 }
@@ -103,7 +114,7 @@ function defenseOverlays(
   offSpots: Record<OffRole, Vec>,
   defSpots: Record<DefRole, Vec>,
 ): Overlay[] {
-  const { offense, defCall, ballOn } = view;
+  const { offense, defCall, at } = view;
   const overlays: Overlay[] = [];
   const matchups = manMatchups(offSpots, defSpots);
   for (const role of DEF_ROLES) {
@@ -116,12 +127,14 @@ function defenseOverlays(
       });
       overlays.push({ kind: 'circle', x: center.x, z: center.z, radius: spec.radius * 0.6, color: PALETTE.led }); // prettier-ignore
     } else if (spec.job === 'man') {
-      const target: OffRole =
-        spec.target === 'back' ? 'RB' : role === 'CB1' || role === 'CB2' ? matchups[role] : 'RB';
-      overlays.push(path(offense, [spot, offSpots[target]], PALETTE.chalk, false));
+      const target = manTargetOf(role, spec, matchups);
+      if (target) overlays.push(path(offense, [spot, offSpots[target]], PALETTE.chalk, false));
     } else {
       // Rushers and run-fillers attack the line.
-      const to = { x: spot.x * 0.6, y: ballOn - (spec.job === 'rush' ? 2.5 : -1) };
+      const to = {
+        x: at.x + (spot.x - at.x) * 0.6,
+        y: at.y - (spec.job === 'rush' ? 2.5 : -1),
+      };
       overlays.push(path(offense, [spot, to], PALETTE.danger));
     }
   }
@@ -130,12 +143,13 @@ function defenseOverlays(
 
 /** The field while a coach is choosing: formations, plus the plan of whoever is looking. */
 export function setupFrame(view: SetupView): SceneFrame {
-  const { offense, ballOn, offCall, defCall } = view;
+  const { offense, at, offCall, defCall } = view;
   const defense = other(offense);
-  const offSpots = offenseAlignment(offCall, ballOn);
-  const defSpots = defenseAlignment(defCall, ballOn);
+  const strong = strengthOf(offCall);
+  const offSpots = offenseAlignment(offCall, at);
+  const defSpots = defenseAlignment(defCall, at, strong);
   if (view.disguise && view.shift !== undefined) {
-    const from = defenseAlignment(view.disguise, ballOn);
+    const from = defenseAlignment(view.disguise, at, strong);
     const k = view.shift * view.shift * (3 - 2 * view.shift);
     for (const role of DEF_ROLES) {
       defSpots[role] = {
@@ -161,14 +175,14 @@ export function setupFrame(view: SetupView): SceneFrame {
       : view.reveal === 'defense'
         ? defenseOverlays(view, offSpots, defSpots)
         : [];
-  const scrimmage = toWorld(offense, { x: 0, y: ballOn });
-  const line = toWorld(offense, { x: 0, y: Math.min(100, ballOn + view.toGo) });
+  const scrimmage = toWorld(offense, { x: 0, y: at.y });
   const ahead = offense === 'home' ? -1 : 1;
   return {
     tokens,
     ball: null,
     scrimmageZ: scrimmage.z,
-    firstDownZ: line.z,
+    firstDownZ:
+      view.toGo === null ? null : toWorld(offense, { x: 0, y: Math.min(100, at.y + view.toGo) }).z,
     overlays,
     overlayKey: JSON.stringify(overlays),
     // Show more of what lies ahead of the offense than behind it.
@@ -177,7 +191,7 @@ export function setupFrame(view: SetupView): SceneFrame {
   };
 }
 
-/** The field during (and right after) a play. */
+/** The field during (and right after) a play or a kickoff. */
 export function playFrame(sim: PlaySim, offense: TeamId, toGo: number | null): SceneFrame {
   const defense = other(offense);
   const tokens = sim.players.map((p) =>
@@ -187,13 +201,18 @@ export function playFrame(sim: PlaySim, offense: TeamId, toGo: number | null): S
     }),
   );
   const ball = toWorld(offense, sim.ball.pos);
-  const ahead = offense === 'home' ? -1 : 1;
+  // The camera leads the ball toward wherever it is being carried.
+  const upfield = sim.kickoff?.caught || sim.returning ? 1 : -1;
+  const ahead = (offense === 'home' ? 1 : -1) * upfield;
+  const lines = sim.kickoff === null;
   return {
     tokens,
     ball: { x: ball.x, z: ball.z, height: sim.ball.height },
-    scrimmageZ: toWorld(offense, { x: 0, y: sim.los }).z,
+    scrimmageZ: lines ? toWorld(offense, { x: 0, y: sim.los }).z : null,
     firstDownZ:
-      toGo === null ? null : toWorld(offense, { x: 0, y: Math.min(100, sim.los + toGo) }).z,
+      lines && toGo !== null
+        ? toWorld(offense, { x: 0, y: Math.min(100, sim.los + toGo) }).z
+        : null,
     overlays: [],
     overlayKey: '',
     focusZ: ball.z + ahead * 6,
@@ -201,12 +220,19 @@ export function playFrame(sim: PlaySim, offense: TeamId, toGo: number | null): S
   };
 }
 
-/** An empty field at midfield — the backdrop of the start menu. */
+/** A formation at midfield — the backdrop of the start menu. */
 export function idleFrame(offCall: OffenseCall, defCall: DefenseCall): SceneFrame {
   return {
-    ...setupFrame({ offense: 'home', ballOn: 50, toGo: 10, offCall, defCall, reveal: 'offense', selected: null }), // prettier-ignore
+    ...setupFrame({
+      offense: 'home',
+      at: { x: 0, y: 50 },
+      toGo: null,
+      offCall,
+      defCall,
+      reveal: 'offense',
+      selected: null,
+    }),
     scrimmageZ: null,
-    firstDownZ: null,
   };
 }
 
@@ -215,12 +241,12 @@ export function pickRole(
   view: SetupView,
   side: 'off' | 'def',
   point: Vec,
-  reach = 3.2,
+  reach = 2.6,
 ): Role | null {
   const spots: Record<string, Vec> =
     side === 'off'
-      ? offenseAlignment(view.offCall, view.ballOn)
-      : defenseAlignment(view.defCall, view.ballOn);
+      ? offenseAlignment(view.offCall, view.at)
+      : defenseAlignment(view.defCall, view.at, strengthOf(view.offCall));
   let best: Role | null = null;
   let bestDistance = reach;
   for (const [role, spot] of Object.entries(spots)) {

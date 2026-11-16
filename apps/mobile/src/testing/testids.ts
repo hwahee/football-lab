@@ -45,6 +45,7 @@ export const TESTID = {
     lockIn: 'game.lock-in',
     ready: 'game.handover.ready',
     next: 'game.result.next',
+    timeout: (team: string) => `game.result.timeout.${team}`,
     newGame: 'game.final.new-game',
     result: 'game.result',
     live: 'game.live',

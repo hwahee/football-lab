@@ -22,7 +22,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocale } from '../i18n/LocaleProvider';
 import type { RootStackParamList } from '../navigation/types';
 import { TESTID } from '../testing/testids';
-import { DIFFICULTIES, QUARTER_LENGTHS, otherTeam, type GameState } from './engine/game';
+import {
+  DIFFICULTIES,
+  QUARTER_LENGTHS,
+  canCallTimeout,
+  otherTeam,
+  type GameState,
+  type Note,
+} from './engine/game';
 import { isMovable } from './engine/playbook';
 import { fieldGoalChance, fieldGoalDistance } from './engine/sim';
 import {
@@ -32,7 +39,6 @@ import {
   OFF_PLAYS,
   OFF_ROLES,
   RISKS,
-  SPECIAL_PLAYS,
   isRunPlay,
   isSpecial,
   type DefPlayId,
@@ -45,11 +51,11 @@ import {
   describeDown,
   describeEvent,
   describeNote,
-  describeOutcome,
+  describePlay,
+  describeQuarter,
   describeSpot,
   formatClock,
   isBigEvent,
-  outcomeMood,
   roleName,
   teamName,
   type Translate,
@@ -57,7 +63,7 @@ import {
 import { G, GButton, GCard, GChip, GPanel, GSegmented, GText } from './ui/kit';
 import { useGameSession, type GameSession } from './useGameSession';
 
-const OFF_TAG: Record<OffPlayId, 'run' | 'pass' | 'kick'> = {
+const OFF_TAG: Record<OffPlayId, 'run' | 'pass' | 'kick' | 'clock'> = {
   insideRun: 'run',
   outsideRun: 'run',
   quickSlant: 'pass',
@@ -67,7 +73,13 @@ const OFF_TAG: Record<OffPlayId, 'run' | 'pass' | 'kick'> = {
   screen: 'pass',
   punt: 'kick',
   fieldGoal: 'kick',
+  extraPoint: 'kick',
+  kneel: 'clock',
 };
+/** After a touchdown the playbook is the kick, or any play from the 2 for two points. */
+const TRY_PLAYS: readonly OffPlayId[] = ['extraPoint', ...OFF_PLAYS];
+const DOWN_PLAYS: readonly OffPlayId[] = [...OFF_PLAYS, 'punt', 'fieldGoal', 'kneel'];
+type QuarterLength = '180' | '300' | '600' | '900';
 const DEF_TAG: Record<DefPlayId, 'balanced' | 'cover' | 'pressure' | 'run' | 'deep'> = {
   man: 'balanced',
   zone: 'cover',
@@ -79,6 +91,7 @@ const TAG_COLOR = {
   run: G.color.go,
   pass: G.color.scrimmage,
   kick: G.color.led,
+  clock: G.color.inkMuted,
   balanced: G.color.inkMuted,
   cover: G.color.scrimmage,
   pressure: G.color.danger,
@@ -89,11 +102,14 @@ function TeamScore({
   team,
   score,
   hasBall,
+  timeouts,
   t,
 }: {
   team: TeamId;
   score: number;
   hasBall: boolean;
+  /** Timeouts left, or null before a game starts. */
+  timeouts: number | null;
   t: Translate;
 }) {
   return (
@@ -122,6 +138,24 @@ function TeamScore({
         <GText variant="digits" style={{ fontSize: 30, lineHeight: 34 }}>
           {String(score).padStart(2, '0')}
         </GText>
+        {timeouts === null ? null : (
+          <View
+            accessibilityLabel={`${t('game.timeouts')}: ${timeouts}`}
+            style={{ flexDirection: 'row', gap: 3 }}
+          >
+            {[0, 1, 2].map((index) => (
+              <View
+                key={index}
+                style={{
+                  width: 12,
+                  height: 4,
+                  borderRadius: 2,
+                  backgroundColor: index < timeouts ? G.color.led : G.color.ledDim,
+                }}
+              />
+            ))}
+          </View>
+        )}
       </View>
     </View>
   );
@@ -155,13 +189,14 @@ function Scoreboard({
         team="home"
         score={game?.score.home ?? 0}
         hasBall={game?.possession === 'home' && !game.over}
+        timeouts={game ? game.timeouts.home : null}
         t={t}
       />
       <View style={{ alignItems: 'center', minWidth: 96 }}>
         {game ? (
           <>
             <GText variant="label" color={G.color.inkMuted}>
-              {game.over ? t('game.final') : t('game.quarter', { quarter: game.quarter })}
+              {describeQuarter(t, game)}
             </GText>
             <GText variant="digits" style={{ fontSize: 20 }}>
               {formatClock(game.clock)}
@@ -177,6 +212,7 @@ function Scoreboard({
         team="away"
         score={game?.score.away ?? 0}
         hasBall={game?.possession === 'away' && !game.over}
+        timeouts={game ? game.timeouts.away : null}
         t={t}
       />
       <Pressable
@@ -227,9 +263,11 @@ function DownMarker({ game }: { game: GameState }) {
       <GText variant="title" color={G.color.led}>
         {describeDown(t, game)}
       </GText>
-      <GText variant="small" color={G.color.inkMuted}>
-        {describeSpot(t, game.ballOn)}
-      </GText>
+      {game.stage === 'scrimmage' ? (
+        <GText variant="small" color={G.color.inkMuted}>
+          {describeSpot(t, game.ballOn)}
+        </GText>
+      ) : null}
     </View>
   );
 }
@@ -263,11 +301,11 @@ function MenuBoard({ game }: { game: GameSession }) {
         />
         <GSegmented
           label={t('game.menu.length')}
-          value={String(config.quarterSeconds) as '120' | '180' | '300'}
+          value={String(config.quarterSeconds) as QuarterLength}
           onChange={(value) => game.setConfig({ quarterSeconds: Number(value) })}
           testIDFor={(value) => TESTID.game.menuOption('length', value)}
           options={QUARTER_LENGTHS.map((value) => ({
-            value: String(value) as '120' | '180' | '300',
+            value: String(value) as QuarterLength,
             label: t(`game.menu.length.${value}`),
           }))}
         />
@@ -331,14 +369,17 @@ function CallBoard({ game, state }: { game: GameSession; state: GameState }) {
   // The away team attacks DOWN the screen: its left is the screen's right.
   const mirrored = state.possession === 'away';
 
-  const hint = offense
-    ? offCall.play === 'fieldGoal'
+  const plays = state.stage === 'try' ? TRY_PLAYS : DOWN_PLAYS;
+  const hint = !offense
+    ? t(`game.def.${defCall.play}.hint`)
+    : offCall.play === 'fieldGoal'
       ? t('game.play.fieldGoal.hint', {
           distance: fieldGoalDistance(state.ballOn),
           chance: Math.round(fieldGoalChance(state.ballOn) * 100),
         })
-      : t(`game.play.${offCall.play}.hint`)
-    : t(`game.def.${defCall.play}.hint`);
+      : offCall.play === 'extraPoint'
+        ? t('game.play.extraPoint.hint', { chance: Math.round(fieldGoalChance(85) * 100) })
+        : t(`game.play.${offCall.play}.hint`);
 
   const primary =
     offense && twoPlayer && !isSpecial(offCall.play) ? (
@@ -395,6 +436,7 @@ function CallBoard({ game, state }: { game: GameSession; state: GameState }) {
         />
       }
     >
+      <Notices notes={session.notices} />
       {tab === 'play' ? (
         <ScrollView
           style={{ flex: 1 }}
@@ -405,7 +447,7 @@ function CallBoard({ game, state }: { game: GameSession; state: GameState }) {
             style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}
           >
             {offense
-              ? [...OFF_PLAYS, ...SPECIAL_PLAYS].map((play) => (
+              ? plays.map((play) => (
                   <GCard
                     key={play}
                     testID={TESTID.game.play(play)}
@@ -589,18 +631,62 @@ function LiveBoard({ game }: { game: GameSession }) {
   );
 }
 
+/** What happened between plays: a timeout, the two-minute warning, the end of a quarter… */
+function Notices({ notes }: { notes: readonly Note[] }) {
+  const { t } = useLocale();
+  const lines = notes.map((note) => describeNote(t, note)).filter((line) => line !== null);
+  if (lines.length === 0) return null;
+  return (
+    <View style={{ gap: 1 }}>
+      {lines.map((line) => (
+        <GText key={line} variant="small" color={G.color.led}>
+          {line}
+        </GText>
+      ))}
+    </View>
+  );
+}
+
+function KickoffBoard({ game, state }: { game: GameSession; state: GameState }) {
+  const { t } = useLocale();
+  const kicking = state.possession;
+  return (
+    <GPanel
+      title={t('game.kickoff.title', { team: teamName(t, kicking) })}
+      accent={TEAM_COLOR[kicking]}
+      style={{ flex: 1 }}
+    >
+      <Notices notes={game.session.notices} />
+      <View style={{ flex: 1, justifyContent: 'center' }}>
+        <GText color={G.color.inkMuted}>{t('game.kickoff.body', { yard: state.kickFrom })}</GText>
+      </View>
+      <GButton
+        testID={TESTID.game.start}
+        label={`▶ ${t('game.action.kick')}`}
+        caption={t('game.action.startHint')}
+        tone="go"
+        size="lg"
+        onPress={game.start}
+      />
+    </GPanel>
+  );
+}
+
 function ResultBoard({ game, state }: { game: GameSession; state: GameState }) {
   const { t } = useLocale();
   const last = game.session.last;
   if (!last) return null;
-  const mood = outcomeMood(last.outcome.kind, last.yards);
+  const { headline, mood } = describePlay(t, last);
   const color = mood === 'good' ? G.color.go : mood === 'bad' ? G.color.danger : G.color.ink;
   const notes = last.notes.map((note) => describeNote(t, note)).filter((line) => line !== null);
+  // Whoever is holding the device may stop the clock for a team it controls.
+  const humans: TeamId[] = state.config.mode === 'pvp' ? ['home', 'away'] : ['home'];
+  const callers = humans.filter((team) => canCallTimeout(state, team));
   return (
     <GPanel testID={TESTID.game.result} accent={TEAM_COLOR[last.offense]} style={{ flex: 1 }}>
       <View style={{ gap: 2, paddingTop: G.space.xs }}>
         <GText variant="display" color={color} numberOfLines={1}>
-          {describeOutcome(t, last.outcome.kind, last.yards)}
+          {headline}
         </GText>
         {notes.map((line) => (
           <GText key={line} variant="small" color={G.color.led}>
@@ -611,18 +697,38 @@ function ResultBoard({ game, state }: { game: GameSession; state: GameState }) {
           <GText variant="small" color={G.color.inkMuted}>
             {t('game.note.nextBall', {
               team: teamName(t, state.possession),
-              spot: `${describeDown(t, state)} · ${describeSpot(t, state.ballOn)}`,
+              spot:
+                state.stage === 'scrimmage'
+                  ? `${describeDown(t, state)} · ${describeSpot(t, state.ballOn)}`
+                  : describeDown(t, state),
             })}
           </GText>
         )}
       </View>
       <EventLog events={last.events} t={t} mirrored={last.offense === 'away'} />
+      {callers.length > 0 ? (
+        <View style={{ flexDirection: 'row', gap: G.space.sm }}>
+          {callers.map((team) => (
+            <GButton
+              key={team}
+              testID={TESTID.game.timeout(team)}
+              label={t('game.action.timeout', {
+                team: teamName(t, team),
+                left: state.timeouts[team],
+              })}
+              size="sm"
+              style={{ flex: 1 }}
+              onPress={() => game.next(team)}
+            />
+          ))}
+        </View>
+      ) : null}
       <GButton
         testID={TESTID.game.next}
         label={t('game.action.next')}
         tone="primary"
         size="lg"
-        onPress={game.next}
+        onPress={() => game.next()}
       />
     </GPanel>
   );
@@ -638,9 +744,11 @@ function FinalBoard({ game, state }: { game: GameSession; state: GameState }) {
     ['game.stat.pass', 'passYards'],
     ['game.stat.firstDowns', 'firstDowns'],
     ['game.stat.turnovers', 'turnovers'],
+    ['game.stat.penalties', 'penalties'],
   ] as const;
   return (
     <GPanel accent={winner ? TEAM_COLOR[winner] : G.color.led} style={{ flex: 1 }}>
+      <Notices notes={game.session.notices} />
       <GText
         variant="display"
         color={winner ? TEAM_COLOR[winner] : G.color.led}
@@ -690,6 +798,7 @@ export function GameScreen() {
 
   let board;
   if (!state || session.phase === 'menu') board = <MenuBoard game={game} />;
+  else if (session.phase === 'kickoff') board = <KickoffBoard game={game} state={state} />;
   else if (settingUp)
     board = <CallBoard key={`${session.phase}:${session.turn}`} game={game} state={state} />;
   else if (session.phase === 'handover') board = <HandoverBoard game={game} state={state} />;

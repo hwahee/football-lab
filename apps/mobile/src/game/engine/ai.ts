@@ -5,7 +5,7 @@
  *
  * It never looks at the opponent's call: both sides commit before the snap.
  */
-import type { GameState } from './game';
+import { canCallTimeout, otherTeam, type GameState } from './game';
 import { DEFAULT_DEFENSE, DEFAULT_OFFENSE } from './playbook';
 import type { Rng } from './rng';
 import { fieldGoalDistance } from './sim';
@@ -15,6 +15,7 @@ import type {
   DefenseCall,
   OffPlayId,
   OffenseCall,
+  TeamId,
   Risk,
   ScrimmagePlayId,
 } from './types';
@@ -37,11 +38,31 @@ function fourthDown(state: GameState, rng: Rng): OffPlayId | null {
   return 'punt';
 }
 
+/** After a touchdown: kick the point, or go for two when the score says so. */
+function tryCall(state: GameState): OffPlayId | null {
+  const lead = state.score[state.possession] - state.score[otherTeam(state.possession)];
+  const late = state.quarter >= 4;
+  // Down 2 (tie it), down 5 (get within a field goal), up 1 (make it a field-goal game).
+  return late && (lead === -2 || lead === -5 || lead === 1) ? null : 'extraPoint';
+}
+
+/** Ahead late with the defense out of timeouts: take a knee and let the clock die. */
+function canKneelOut(state: GameState): boolean {
+  const defense = otherTeam(state.possession);
+  const ahead = state.score[state.possession] > state.score[defense];
+  const snapsLeft = 4 - state.down;
+  return (
+    ahead && state.quarter >= 4 && state.timeouts[defense] === 0 && state.clock <= snapsLeft * 40
+  );
+}
+
 export function aiOffense(state: GameState, rng: Rng): OffenseCall {
   const { down, toGo, ballOn, quarter, clock } = state;
-  const lastSeconds = (quarter === 2 || quarter === 4) && clock <= 8;
+  const lastSeconds = (quarter === 2 || quarter >= 4) && clock <= 8;
   let play: OffPlayId | null = null;
-  if (lastSeconds && fieldGoalDistance(ballOn) <= 55) play = 'fieldGoal';
+  if (state.stage === 'try') play = tryCall(state);
+  else if (canKneelOut(state)) play = 'kneel';
+  else if (lastSeconds && fieldGoalDistance(ballOn) <= 55) play = 'fieldGoal';
   else if (down === 4) play = fourthDown(state, rng);
 
   if (play === null) {
@@ -62,6 +83,7 @@ export function aiOffense(state: GameState, rng: Rng): OffenseCall {
   // Vary the receiver splits and the back's depth a little.
   if (rng.chance(0.6)) call.offsets.WR1 = { x: rng.range(-2, 4), y: 0 };
   if (rng.chance(0.6)) call.offsets.WR2 = { x: rng.range(-4, 2), y: 0 };
+  if (rng.chance(0.4)) call.offsets.WR3 = { x: rng.range(-3, 3), y: 0 };
   if (rng.chance(0.3)) call.offsets.RB = { x: rng.range(-1.5, 1.5), y: rng.range(-1, 1) };
   return call;
 }
@@ -82,7 +104,21 @@ export function aiDefense(state: GameState, rng: Rng): DefenseCall {
         ? rng.pick([['normal', 2], ['soft', 2], ['tight', 0.5]] as const) // prettier-ignore
         : rng.pick([['tight', 1.5], ['normal', 2.5], ['soft', 0.7]] as const); // prettier-ignore
   const call: DefenseCall = { ...DEFAULT_DEFENSE, play, cushion, offsets: {} };
-  if (rng.chance(0.5)) call.offsets.LB = { x: rng.range(-2.5, 2.5), y: rng.range(-0.5, 1) };
+  if (rng.chance(0.5)) call.offsets.MLB = { x: rng.range(-2.5, 2.5), y: rng.range(-0.5, 1) };
   if (rng.chance(0.4)) call.offsets.FS = { x: rng.range(-4, 4), y: rng.range(-2, 2) };
   return call;
+}
+
+/** Whether the computer burns a timeout to save the seconds about to run off. */
+export function aiWantsTimeout(state: GameState, team: TeamId): boolean {
+  if (!canCallTimeout(state, team) || state.stage !== 'scrimmage') return false;
+  const behindOrTied = state.score[team] <= state.score[otherTeam(team)];
+  const endOfHalf = state.quarter === 2 && state.clock <= 60;
+  const endOfGame = state.quarter >= 4 && state.clock <= 150;
+  if (state.possession === team) {
+    // With the ball: only when it still needs points and time is short.
+    return behindOrTied && (endOfGame || endOfHalf) && state.clock <= 60;
+  }
+  // On defense: stop the clock to get the ball back.
+  return behindOrTied && endOfGame;
 }

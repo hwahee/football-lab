@@ -1,4 +1,4 @@
-# The game: kick off against the AI, call a play, START, and see the result.
+# The game: start against the AI, kick off, call a play, START, and see the result.
 # Run with: maestro test apps/mobile/e2e/game-play-a-snap.yaml
 appId: com.example.mobileboilerplate.dev
 ---
@@ -18,7 +18,16 @@ appId: com.example.mobileboilerplate.dev
     id: 'game.menu.mode.ai'
 - tapOn:
     id: 'game.menu.kickoff'
-# Whoever won the toss, the human gets a board ending in START.
+# Every game opens with a kickoff: nothing to call, just START.
+- tapOn:
+    id: 'game.start'
+- extendedWaitUntil:
+    visible:
+      id: 'game.result.next'
+    timeout: 30000
+- tapOn:
+    id: 'game.result.next'
+# Whoever received, the human now gets a play-calling board ending in START.
 - assertVisible:
     id: 'game.start'
 - tapOn:

@@ -31,7 +31,7 @@ import {
   type WebGLRenderer,
 } from 'three';
 
-import { END_ZONE, HALF_WIDTH, type TeamId } from '../engine/types';
+import { END_ZONE, HALF_WIDTH, HASH_X, type TeamId } from '../engine/types';
 import { PALETTE, TEAM_COLOR, TEAM_EDGE, hexNumber } from '../palette';
 
 export interface TokenView {
@@ -68,7 +68,7 @@ export interface SceneFrame {
 
 const FOV = 28;
 /** Yards of width the camera always shows: the field plus a little apron. */
-const VIEW_WIDTH = HALF_WIDTH * 2 + 5;
+const VIEW_WIDTH = HALF_WIDTH * 2 + 3;
 const MIN_VIEW_DEPTH = 34;
 const FIELD_END = 50 + END_ZONE;
 
@@ -175,7 +175,7 @@ function buildField(): Mesh {
   q.rect(0, -50 - END_ZONE / 2, HALF_WIDTH * 2, END_ZONE, 0, TEAM_EDGE.away);
   for (const side of [1, -1]) {
     const color = side === 1 ? TEAM_COLOR.home : TEAM_COLOR.away;
-    for (let i = -3; i <= 3; i++) {
+    for (let i = -4; i <= 4; i++) {
       q.segment(i * 6 - 2, side * (51.5 + 0), i * 6 + 2, side * (58.5 + 0), 1.1, 0.01, color);
     }
   }
@@ -194,19 +194,19 @@ function buildField(): Mesh {
   // Hash marks every yard.
   for (let yard = 1; yard < 100; yard++) {
     if (yard % 5 === 0) continue;
-    for (const x of [-HALF_WIDTH + 0.6, -5, 5, HALF_WIDTH - 0.6]) q.rect(x, 50 - yard, 0.7, 0.1, y, chalk); // prettier-ignore
+    for (const x of [-HALF_WIDTH + 0.6, -HASH_X, HASH_X, HALF_WIDTH - 0.6]) q.rect(x, 50 - yard, 0.7, 0.1, y, chalk); // prettier-ignore
   }
   // Yard numbers, readable from the bottom of the screen.
   for (let yard = 10; yard <= 90; yard += 10) {
     const label = String(yard <= 50 ? yard : 100 - yard);
-    drawNumber(q, label, -12.5, 50 - yard);
-    drawNumber(q, label, 12.5, 50 - yard);
+    drawNumber(q, label, -(HALF_WIDTH - 10), 50 - yard);
+    drawNumber(q, label, HALF_WIDTH - 10, 50 - yard);
   }
-  // Goal posts, seen from above: a crossbar and two uprights.
+  // Goal posts (18 ft 6 in apart), seen from above: a crossbar and two uprights.
   for (const side of [1, -1]) {
-    q.rect(0, side * FIELD_END, 6.2, 0.4, 0.05, PALETTE.firstDown);
-    q.rect(-3.1, side * (FIELD_END + 0.5), 0.4, 1.2, 0.05, PALETTE.firstDown);
-    q.rect(3.1, side * (FIELD_END + 0.5), 0.4, 1.2, 0.05, PALETTE.firstDown);
+    q.rect(0, side * FIELD_END, HASH_X * 2, 0.4, 0.05, PALETTE.firstDown);
+    q.rect(-HASH_X, side * (FIELD_END + 0.5), 0.4, 1.2, 0.05, PALETTE.firstDown);
+    q.rect(HASH_X, side * (FIELD_END + 0.5), 0.4, 1.2, 0.05, PALETTE.firstDown);
   }
   return new Mesh(q.build(), new MeshBasicMaterial({ vertexColors: true, side: DoubleSide }));
 }
@@ -236,7 +236,7 @@ export class FieldScene {
   private aspect = 1;
   private clock = 0;
 
-  // Shared geometry/materials: 14 tokens reuse them.
+  // Shared geometry/materials: 22 tokens reuse them.
   private readonly bodyGeometry = new CylinderGeometry(0.62, 0.72, 0.9, 20);
   private readonly padsGeometry = new SphereGeometry(0.6, 16, 10);
   private readonly helmetGeometry = new SphereGeometry(0.36, 16, 12);
@@ -435,7 +435,7 @@ export class FieldScene {
       group.position.set(view.x, 0, view.z);
       group.rotation.y = token.heading;
       // Drawn larger than life (a yard is ~9pt on a phone) so tokens stay readable.
-      const size = view.big ? 1.45 : 1.25;
+      const size = view.big ? 1.3 : 1.15;
       group.scale.set(size, view.down ? 0.4 : 1, size);
       token.ring.visible = view.selected || view.hasBall;
       if (token.ring.visible) {

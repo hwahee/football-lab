@@ -21,8 +21,10 @@ import {
   backPath,
   defenseAlignment,
   manMatchups,
+  manTargetOf,
   offenseAlignment,
   receiverRoute,
+  strengthOf,
   type OffPlayDef,
   type RoutePlan,
 } from './playbook';
@@ -40,6 +42,7 @@ import {
   type PlayOutcome,
   type Ratings,
   type Role,
+  type Scrimmage,
   type Team,
   type Vec,
 } from './types';
@@ -52,17 +55,28 @@ const ROLE_SPEED: Record<Role, number> = {
   RB: 8.7,
   WR1: 9.0,
   WR2: 9.0,
-  C: 6.0,
+  WR3: 8.9,
+  TE: 8.0,
+  LT: 6.0,
   LG: 6.0,
+  C: 6.0,
   RG: 6.0,
+  RT: 6.0,
   DE1: 6.9,
-  NT: 6.4,
+  DT1: 6.4,
+  DT2: 6.4,
   DE2: 6.9,
-  LB: 8.3,
+  SLB: 8.1,
+  MLB: 8.2,
+  WLB: 8.4,
   CB1: 8.9,
   CB2: 8.9,
-  FS: 8.7,
+  FS: 8.8,
+  SS: 8.6,
 };
+
+/** Linebackers and safeties: the players a run fake can fool. */
+const SECOND_LEVEL: ReadonlySet<Role> = new Set<Role>(['SLB', 'MLB', 'WLB', 'FS', 'SS']);
 
 type OffJob = 'qb' | 'route' | 'passBlock' | 'runBlock' | 'carry' | 'toBall' | 'idle';
 type DefJob = 'rush' | 'man' | 'zone' | 'fill' | 'pursue';
@@ -98,6 +112,8 @@ interface SimPlayer {
   zoneThreat: OffRole | null;
   /** When this defender recognizes a ball carrier and starts pursuing. */
   readAt: number;
+  /** A run-filler's assignment once the play shows pass. */
+  onPass: OffRole | 'deep' | null;
   biteUntil: number;
   /** Beaten on a move: keeps drifting until this time. */
   lagUntil: number;
@@ -150,6 +166,21 @@ export interface PlaySim {
   chaseAt: number;
   throwPressured: boolean;
   special: SpecialState | null;
+  /** Where the ball was snapped, across the field. */
+  ballX: number;
+  /** An interception being run back: the defender carrying it and where he is brought down. */
+  returning: { role: DefRole; endY: number } | null;
+  kickoff: KickoffState | null;
+}
+
+interface KickoffState {
+  kickAt: number;
+  landAt: number;
+  returner: DefRole;
+  /** Where the return ends (kicking team's frame); <= 0 is a touchdown. */
+  endY: number;
+  touchback: boolean;
+  caught: boolean;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -186,6 +217,7 @@ function makePlayer(role: Role, side: 'off' | 'def', start: Vec, ratings: Rating
     seenVel: { x: 0, y: 0 },
     zoneThreat: null,
     readAt: Infinity,
+    onPass: null,
     biteUntil: 0,
     lagUntil: 0,
     stunnedUntil: 0,
@@ -208,35 +240,29 @@ export function fieldGoalDistance(los: number): number {
   return Math.round(100 - los + 17);
 }
 
-export function createPlay(
-  offense: Team,
-  defense: Team,
+function emptySim(
+  players: SimPlayer[],
   off: OffenseCall,
   def: DefenseCall,
-  los: number,
+  at: Scrimmage,
   rng: Rng,
 ): PlaySim {
-  const offSpots = offenseAlignment(off, los);
-  const defSpots = defenseAlignment(def, los);
-  const players: SimPlayer[] = [
-    ...OFF_ROLES.map((role) => makePlayer(role, 'off', offSpots[role], offense.offense[role])),
-    ...DEF_ROLES.map((role) => makePlayer(role, 'def', defSpots[role], defense.defense[role])),
-  ];
-  const qb = players[0]!;
-  const sim: PlaySim = {
+  const holder = players[0]!;
+  return {
     t: 0,
-    los,
+    los: at.y,
+    ballX: at.x,
     off,
     def,
     playDef: isSpecial(off.play) ? null : OFF_PLAY_DEFS[off.play],
     players,
     ball: {
       mode: 'held',
-      carrier: 'QB',
-      pos: { ...qb.pos },
+      carrier: holder.role,
+      pos: { ...holder.pos },
       height: 1,
-      from: { ...qb.pos },
-      to: { ...qb.pos },
+      from: { ...holder.pos },
+      to: { ...holder.pos },
       t0: 0,
       t1: 0,
       target: null,
@@ -255,7 +281,26 @@ export function createPlay(
     chaseAt: Infinity,
     throwPressured: false,
     special: null,
+    returning: null,
+    kickoff: null,
   };
+}
+
+export function createPlay(
+  offense: Team,
+  defense: Team,
+  off: OffenseCall,
+  def: DefenseCall,
+  at: Scrimmage,
+  rng: Rng,
+): PlaySim {
+  const offSpots = offenseAlignment(off, at);
+  const defSpots = defenseAlignment(def, at, strengthOf(off));
+  const players: SimPlayer[] = [
+    ...OFF_ROLES.map((role) => makePlayer(role, 'off', offSpots[role], offense.offense[role])),
+    ...DEF_ROLES.map((role) => makePlayer(role, 'def', defSpots[role], defense.defense[role])),
+  ];
+  const sim = emptySim(players, off, def, at, rng);
 
   if (isSpecial(off.play)) {
     setUpSpecial(sim);
@@ -272,14 +317,16 @@ export function createPlay(
         p.job = 'qb';
         break;
       case 'RB': {
-        p.route = backPath(off, p.start, los);
+        p.route = backPath(off, p.start, at);
         p.job = p.route ? 'route' : 'passBlock';
         break;
       }
       case 'WR1':
-      case 'WR2': {
-        p.route = receiverRoute(off, p.role, p.start);
-        p.job = p.route ? 'route' : 'runBlock';
+      case 'WR2':
+      case 'WR3':
+      case 'TE': {
+        p.route = receiverRoute(off, p.role, p.start, at);
+        p.job = p.route ? 'route' : run ? 'runBlock' : 'passBlock';
         break;
       }
       default:
@@ -295,8 +342,7 @@ export function createPlay(
     const spec = DEF_JOBS[def.play][role];
     p.job = spec.job;
     if (spec.job === 'man') {
-      p.manTarget =
-        spec.target === 'back' ? 'RB' : role === 'CB1' || role === 'CB2' ? matchups[role] : 'RB';
+      p.manTarget = manTargetOf(role, spec, matchups);
       const target = players.find((o) => o.role === p.manTarget)!;
       p.cushion = Math.max(0.8, p.start.y - target.start.y);
     } else if (spec.job === 'zone') {
@@ -304,27 +350,206 @@ export function createPlay(
       p.zoneCenter = { x: p.start.x, y: Math.min(107, p.start.y + (spec.deep ? 2 : 0)) };
       p.zoneRadius = spec.radius;
       p.zoneDeep = spec.deep;
+    } else if (spec.job === 'fill') {
+      p.onPass = spec.onPass;
     }
   }
   return sim;
+}
+
+/** Kickoff odds and distances, by where the ball is kicked from (35 normally, 20 after a safety). */
+const TOUCHBACK_SPOT = 35;
+
+/**
+ * A kickoff. The kicking team is the "offense" of the frame (it kicks toward
+ * y = 100); the outcome's `spot` is where the receiving team ends up.
+ */
+export function createKickoff(kicking: Team, receiving: Team, from: number, rng: Rng): PlaySim {
+  const spread = (index: number, count: number, width: number) =>
+    -width + (2 * width * index) / (count - 1);
+  const coverage = OFF_ROLES.filter((role) => role !== 'QB');
+  const front = DEF_ROLES.filter((role) => role !== 'FS' && role !== 'SS');
+  const deep = Math.min(98, from + 62);
+  const players: SimPlayer[] = [
+    makePlayer('QB', 'off', { x: 0, y: from - 3 }, kicking.offense.QB),
+    ...coverage.map((role, i) =>
+      makePlayer(
+        role,
+        'off',
+        { x: spread(i, coverage.length, 23), y: from - 1 },
+        kicking.offense[role],
+      ),
+    ),
+    ...front.map((role, i) =>
+      makePlayer(
+        role,
+        'def',
+        { x: spread(i, front.length, 21), y: from + (i % 2 === 0 ? 13 : 24) },
+        receiving.defense[role],
+      ),
+    ),
+    makePlayer('FS', 'def', { x: -6, y: deep }, receiving.defense.FS),
+    makePlayer('SS', 'def', { x: 6, y: deep - 2 }, receiving.defense.SS),
+  ];
+  const call: OffenseCall = { play: 'punt', flip: false, risk: 'balanced', offsets: {} };
+  const sim = emptySim(
+    players,
+    call,
+    { play: 'man', cushion: 'normal', offsets: {} },
+    { x: 0, y: from },
+    rng,
+  );
+
+  // The whole kickoff is decided here; the animation plays it out.
+  const regular = from >= 30;
+  const touchback = rng.chance(regular ? 0.55 : 0.08);
+  const catchY = touchback ? 104 : deep + rng.range(-3, 2);
+  const run = regular ? 23 + rng.gauss() * 7 : 11 + rng.gauss() * 5;
+  const house = !touchback && rng.chance(0.006);
+  const endY = touchback
+    ? 100 - TOUCHBACK_SPOT
+    : house
+      ? -1
+      : clamp(catchY - Math.max(2, run), 30, 99);
+  const returner: DefRole = rng.chance(0.5) ? 'FS' : 'SS';
+  sim.ball.to = { x: get(sim, returner).pos.x + rng.range(-2, 2), y: catchY };
+  sim.kickoff = {
+    kickAt: 0.9,
+    landAt: 0.9 + 3.6,
+    returner,
+    endY,
+    touchback,
+    caught: false,
+  };
+  return sim;
+}
+
+function stepKickoff(sim: PlaySim, dt: number): void {
+  const kick = sim.kickoff!;
+  const { ball, t } = sim;
+  const returner = get(sim, kick.returner);
+  const stride = (p: SimPlayer, to: Vec, speed: number) => {
+    const gap = dist(p.pos, to);
+    if (gap < 0.2) return;
+    const step = Math.min(gap, speed * dt);
+    p.pos.x += ((to.x - p.pos.x) / gap) * step;
+    p.pos.y += ((to.y - p.pos.y) / gap) * step;
+  };
+  const kicker = get(sim, 'QB');
+
+  if (ball.mode === 'held' && ball.carrier === 'QB') {
+    // Run-up.
+    stride(kicker, { x: 0, y: sim.los }, 4);
+    ball.pos = { ...kicker.pos };
+    if (t >= kick.kickAt) {
+      ball.mode = 'air';
+      ball.carrier = null;
+      ball.from = { ...kicker.pos };
+      ball.t0 = t;
+      ball.t1 = kick.landAt;
+      log(sim, { t, type: 'kickoff', touchback: kick.touchback });
+    }
+    return;
+  }
+
+  // Coverage runs down under the kick; the return team sets up in front of it.
+  for (const p of sim.players) {
+    if (p === returner || p === kicker) continue;
+    if (p.side === 'off') {
+      const aim = kick.caught
+        ? returner.pos
+        : { x: p.start.x * 0.6 + ball.to.x * 0.4, y: ball.to.y - 8 };
+      if (dist(p.pos, returner.pos) > 1.2) stride(p, aim, p.maxSpeed * 0.86);
+    } else {
+      stride(
+        p,
+        { x: p.start.x * 0.5 + ball.to.x * 0.5, y: Math.min(ball.to.y - 12, p.start.y + 22) },
+        p.maxSpeed * 0.55,
+      );
+    }
+  }
+
+  if (ball.mode === 'air') {
+    flyBall(sim, 10);
+    if (!kick.touchback) stride(returner, ball.to, returner.maxSpeed * 0.7);
+    if (t < ball.t1) return;
+    if (kick.touchback) {
+      ball.height = 0;
+      finishKickoff(sim, kick.endY, false);
+      return;
+    }
+    kick.caught = true;
+    ball.mode = 'held';
+    ball.carrier = kick.returner;
+    ball.height = 1;
+    returner.pos = { ...ball.to };
+    return;
+  }
+
+  // The return: straight up the field until the dice say he is down.
+  stride(
+    returner,
+    { x: returner.pos.x * 0.98, y: Math.max(kick.endY, -1) },
+    returner.maxSpeed * 0.95,
+  );
+  ball.pos = { ...returner.pos };
+  if (returner.pos.y <= Math.max(kick.endY, 0) + 0.2) {
+    finishKickoff(sim, kick.endY, kick.endY <= 0);
+  }
+}
+
+function finishKickoff(sim: PlaySim, endY: number, touchdown: boolean): void {
+  const { t } = sim;
+  if (touchdown) log(sim, { t, type: 'touchdown' });
+  else if (!sim.kickoff!.touchback)
+    log(sim, { t, type: 'return', yards: Math.round(sim.ball.to.y - endY) });
+  sim.ball.mode = 'dead';
+  sim.outcome = {
+    kind: touchdown ? 'kickReturnTouchdown' : 'kickoff',
+    spot: touchdown ? 0 : endY,
+    spotX: sim.ball.pos.x,
+    duration: touchdown ? t : Math.min(t, 6),
+    // The clock starts when the ball is touched in the field of play.
+    clockStops: true,
+    pass: false,
+  };
 }
 
 function setUpSpecial(sim: PlaySim): void {
   const { rng, los } = sim;
   const kicker = sim.players[0]!;
   for (const p of sim.players) p.job = p.side === 'off' ? 'idle' : 'rush';
+  if (sim.off.play === 'kneel') {
+    // Victory formation: the snap, a knee, and the clock keeps running.
+    sim.special = {
+      kickAt: Infinity,
+      landAt: 1.6,
+      kicked: true,
+      event: { t: 0.5, type: 'kneel' },
+      outcome: {
+        kind: 'tackle',
+        spot: los - 1,
+        spotX: sim.ballX,
+        duration: 2,
+        clockStops: false,
+        pass: false,
+      },
+    };
+    sim.events.push(sim.special.event);
+    return;
+  }
   if (sim.off.play === 'punt') {
     const gross = clamp(41 + rng.gauss() * 6, 24, 58);
     const net = gross - rng.range(0, 9);
     const spot = los + net;
-    const to = { x: rng.range(-9, 9), y: Math.min(spot, 106) };
+    const to = { x: rng.range(-12, 12), y: Math.min(spot, 106) };
     sim.ball.to = to;
     sim.special = {
       kickAt: 1.0,
       landAt: 1.0 + 2.2 + net / 30,
       kicked: false,
       event: { t: 1.0, type: 'punt', distance: Math.round(net) },
-      outcome: { kind: 'punt', spot, duration: 6, clockStops: true, pass: false },
+      outcome: { kind: 'punt', spot, spotX: to.x, duration: 6, clockStops: true, pass: false },
     };
   } else {
     const chance = fieldGoalChance(los);
@@ -345,6 +570,7 @@ function setUpSpecial(sim: PlaySim): void {
       outcome: {
         kind: good ? 'fieldGoalGood' : 'fieldGoalMiss',
         spot: los,
+        spotX: sim.ballX,
         duration: 5,
         clockStops: true,
         pass: false,
@@ -357,6 +583,16 @@ function setUpSpecial(sim: PlaySim): void {
 function stepSpecial(sim: PlaySim, dt: number): void {
   const special = sim.special!;
   const { ball } = sim;
+  if (sim.off.play === 'kneel') {
+    const qb = get(sim, 'QB');
+    qb.pos.y = Math.max(sim.los - 2.6, qb.pos.y - 1.2 * dt);
+    ball.pos = { ...qb.pos };
+    if (sim.t >= special.landAt) {
+      ball.mode = 'dead';
+      sim.outcome = special.outcome;
+    }
+    return;
+  }
   // The rush closes on the line; the kick is already decided.
   for (const p of sim.players) {
     if (p.side !== 'def' || p.start.y > sim.los + 3) continue;
@@ -387,7 +623,7 @@ function flyBall(sim: PlaySim, apex: number): void {
 }
 
 function get(sim: PlaySim, role: Role): SimPlayer {
-  // 14 players — a scan is cheaper than keeping a map in sync.
+  // 22 players — a scan is cheaper than keeping a map in sync.
   for (const p of sim.players) if (p.role === role) return p;
   throw new Error(`unknown role ${role}`);
 }
@@ -400,10 +636,12 @@ function log(sim: PlaySim, event: PlayEvent): void {
   sim.events.push(event);
 }
 
-function finish(sim: PlaySim, outcome: Omit<PlayOutcome, 'duration' | 'pass'>): void {
+function finish(sim: PlaySim, outcome: Omit<PlayOutcome, 'duration' | 'pass' | 'spotX'>): void {
   sim.ball.mode = 'dead';
   sim.outcome = {
     ...outcome,
+    // An incomplete pass comes back to where it was snapped.
+    spotX: outcome.kind === 'incomplete' ? sim.ballX : sim.ball.pos.x,
     duration: sim.t,
     pass: sim.playDef?.kind === 'pass',
   };
@@ -679,7 +917,7 @@ function planOffense(sim: PlaySim): void {
     sim.biteRolled = true;
     log(sim, { t, type: 'fake' });
     for (const d of sim.players) {
-      if (d.side !== 'def' || (d.role !== 'LB' && d.role !== 'FS') || d.job === 'rush') continue;
+      if (d.side !== 'def' || !SECOND_LEVEL.has(d.role) || d.job === 'rush') continue;
       const base = d.job === 'fill' ? 0.7 : d.job === 'man' ? 0.4 : d.zoneDeep ? 0.3 : 0.45;
       const chance = clamp(base * (sim.def.play === 'prevent' ? 0.4 : 1) - (d.skill - 75) * 0.006, 0.03, 0.9); // prettier-ignore
       if (sim.rng.chance(chance)) {
@@ -805,15 +1043,15 @@ function planDefense(sim: PlaySim): void {
     sim.fillConverted = true;
     for (const d of sim.players) {
       if (d.side !== 'def' || d.job !== 'fill') continue;
-      if (d.role === 'LB') {
-        d.job = 'man';
-        d.manTarget = 'RB';
-        d.cushion = 1;
-      } else {
+      if (d.onPass === 'deep' || d.onPass === null) {
         d.job = 'zone';
         d.zoneCenter = { x: d.start.x * 0.3, y: Math.min(107, los + 12) };
         d.zoneRadius = 12;
         d.zoneDeep = true;
+      } else {
+        d.job = 'man';
+        d.manTarget = d.onPass;
+        d.cushion = 1;
       }
     }
   }
@@ -991,8 +1229,9 @@ function stepEngagements(sim: PlaySim, dt: number): void {
 
     if (t < d.nextShedAt) continue;
     d.nextShedAt = t + 0.4;
-    const receiverBlock = b.role === 'WR1' || b.role === 'WR2' || b.role === 'RB';
-    let chance = (pass ? 0.07 : 0.09) + (receiverBlock ? 0.16 : 0) + (d.power - b.power) * 0.004;
+    const receiverBlock =
+      b.role === 'WR1' || b.role === 'WR2' || b.role === 'WR3' || b.role === 'RB';
+    let chance = (pass ? 0.1 : 0.09) + (receiverBlock ? 0.16 : 0) + (d.power - b.power) * 0.004;
     // A runner going by is the moment to get off the block.
     if (runner && dist(runner.pos, d.pos) < 2.6) chance += 0.25;
     if (sim.rng.chance(clamp(chance, 0.02, 0.6))) {
@@ -1081,12 +1320,12 @@ function resolveThrow(sim: PlaySim): void {
   let pick = 0;
   if (cover.player && cover.distance < 1.3) {
     pick =
-      0.012 +
-      (0.04 * (1.3 - cover.distance)) / 1.3 +
+      0.01 +
+      (0.03 * (1.3 - cover.distance)) / 1.3 +
       (cover.player.skill - 75) * 0.002 +
       (sim.off.risk === 'aggressive' ? 0.02 : 0);
   } else if (cover.player && cover.distance < 2.6) {
-    pick = 0.006;
+    pick = 0.004;
   }
   pick = clamp(pick, 0, 0.3);
   const roll = rng.next();
@@ -1108,8 +1347,21 @@ function resolveThrow(sim: PlaySim): void {
     return;
   }
   if (cover.player && roll < chance + pick) {
-    log(sim, { t, type: 'interception', by: cover.player.role as DefRole, chance: pick });
-    finish(sim, { kind: 'interception', spot: ball.to.y, clockStops: true });
+    const by = cover.player.role as DefRole;
+    log(sim, { t, type: 'interception', by, chance: pick });
+    // Picked in the end zone, he usually takes the touchback.
+    if (ball.to.y >= 100 && rng.chance(0.7)) {
+      finish(sim, { kind: 'interception', spot: ball.to.y, clockStops: true });
+      return;
+    }
+    // Otherwise he runs it back; how far is one more roll.
+    const yards = Math.max(0, Math.round(5 + rng.gauss() * 7 + (rng.chance(0.06) ? 60 : 0)));
+    ball.mode = 'held';
+    ball.carrier = by;
+    ball.height = 1;
+    cover.player.pos = { ...ball.to };
+    sim.returning = { role: by, endY: ball.to.y - yards };
+    log(sim, { t, type: 'return', yards: Math.round(Math.min(yards, ball.to.y)) });
     return;
   }
   log(sim, { t, type: 'incomplete', target: role, chance, brokenUp: cover.distance < 1.5 });
@@ -1147,7 +1399,7 @@ function resolveContact(sim: PlaySim): void {
 
     let chance: number;
     if (inPocket) {
-      chance = clamp(0.62 + (d.skill - carrier.skill) * 0.004, 0.35, 0.9);
+      chance = clamp(0.56 + (d.skill - carrier.skill) * 0.004, 0.3, 0.9);
     } else {
       let help = 0;
       for (const o of sim.players) {
@@ -1193,12 +1445,45 @@ function resolveContact(sim: PlaySim): void {
   }
 }
 
+/** An interception return: the defender runs for the other goal line, the offense gives chase. */
+function stepReturn(sim: PlaySim, dt: number): void {
+  const { role, endY } = sim.returning!;
+  const runner = get(sim, role);
+  const speed = runner.maxSpeed * 0.92;
+  runner.pos.y -= speed * dt;
+  runner.pos.x += clamp(-runner.pos.x * 0.15, -2, 2) * dt;
+  for (const p of sim.players) {
+    if (p.side !== 'off' || sim.t < p.stunnedUntil) continue;
+    const gap = dist(p.pos, runner.pos);
+    if (gap < 1 || gap > 30) continue;
+    const step = Math.min(gap - 0.9, p.maxSpeed * 0.9 * dt);
+    p.pos.x += ((runner.pos.x - p.pos.x) / gap) * step;
+    p.pos.y += ((runner.pos.y - p.pos.y) / gap) * step;
+  }
+  sim.ball.pos = { ...runner.pos };
+  if (runner.pos.y > Math.max(endY, 0)) return;
+  if (endY <= 0) {
+    log(sim, { t: sim.t, type: 'touchdown' });
+    finish(sim, { kind: 'defensiveTouchdown', spot: 0, clockStops: true });
+  } else {
+    finish(sim, { kind: 'interception', spot: endY, clockStops: true });
+  }
+}
+
 /** Advances the play by `dt` seconds. No-op once `sim.outcome` is set. */
 export function stepPlay(sim: PlaySim, dt: number = SIM_DT): void {
   if (sim.outcome) return;
   sim.t += dt;
+  if (sim.kickoff) {
+    stepKickoff(sim, dt);
+    return;
+  }
   if (sim.special) {
     stepSpecial(sim, dt);
+    return;
+  }
+  if (sim.returning) {
+    stepReturn(sim, dt);
     return;
   }
 
@@ -1214,6 +1499,8 @@ export function stepPlay(sim: PlaySim, dt: number = SIM_DT): void {
     flyBall(sim, 0.4 + dist(ball.from, ball.to) * 0.035);
     if (sim.t >= ball.t1) resolveThrow(sim);
   }
+  // Picked off: from here on it is a return, not the offense's play.
+  if (sim.returning) return;
   if (ball.mode === 'held' && ball.carrier) {
     const carrier = get(sim, ball.carrier);
     ball.pos.x = carrier.pos.x;

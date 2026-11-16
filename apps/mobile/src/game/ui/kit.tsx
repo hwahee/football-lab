@@ -393,21 +393,21 @@ export function GChip({ testID, label, selected, onPress, color, disabled = fals
       accessibilityLabel={label}
       hitSlop={4}
       style={{
-        minWidth: 58,
-        minHeight: 38,
-        paddingHorizontal: G.space.sm,
+        minWidth: 50,
+        minHeight: 32,
+        paddingHorizontal: 6,
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 6,
-        borderRadius: 19,
+        gap: 4,
+        borderRadius: 16,
         backgroundColor: selected ? G.color.ink : G.color.night,
         borderWidth: 2,
         borderColor: selected ? G.color.ink : G.color.panelEdge,
         opacity: disabled ? 0.4 : 1,
       }}
     >
-      <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: color }} />
+      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
       <GText variant="small" color={selected ? G.color.night : G.color.ink}>
         {label}
       </GText>

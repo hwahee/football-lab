@@ -8,8 +8,11 @@
  * The renderer converts to world space (render/scene.ts); the engine never
  * knows which way a team faces on screen.
  */
-export const HALF_WIDTH = 20;
+/** An NFL field is 53⅓ yards wide. */
+export const HALF_WIDTH = 80 / 3;
 export const END_ZONE = 10;
+/** The hash marks are 18 feet 6 inches apart; the ball is never spotted outside them. */
+export const HASH_X = 37 / 12;
 
 export interface Vec {
   x: number;
@@ -18,10 +21,35 @@ export interface Vec {
 
 export type TeamId = 'home' | 'away';
 
-export const OFF_ROLES = ['QB', 'RB', 'C', 'LG', 'RG', 'WR1', 'WR2'] as const;
+export const OFF_ROLES = [
+  'QB',
+  'RB',
+  'WR1',
+  'WR2',
+  'WR3',
+  'TE',
+  'LT',
+  'LG',
+  'C',
+  'RG',
+  'RT',
+] as const;
 export type OffRole = (typeof OFF_ROLES)[number];
 
-export const DEF_ROLES = ['DE1', 'NT', 'DE2', 'LB', 'CB1', 'CB2', 'FS'] as const;
+/** A 4-3 front: four linemen, strong-side / middle / weak-side linebackers, two corners, two safeties. */
+export const DEF_ROLES = [
+  'DE1',
+  'DT1',
+  'DT2',
+  'DE2',
+  'SLB',
+  'MLB',
+  'WLB',
+  'CB1',
+  'CB2',
+  'FS',
+  'SS',
+] as const;
 export type DefRole = (typeof DEF_ROLES)[number];
 
 export type Role = OffRole | DefRole;
@@ -48,9 +76,9 @@ export const OFF_PLAYS = [
   'playAction',
   'screen',
 ] as const;
-export const SPECIAL_PLAYS = ['punt', 'fieldGoal'] as const;
 export type ScrimmagePlayId = (typeof OFF_PLAYS)[number];
-export type SpecialPlayId = (typeof SPECIAL_PLAYS)[number];
+/** Plays the defense has no call against: the kicks, and taking a knee. */
+export type SpecialPlayId = 'punt' | 'fieldGoal' | 'extraPoint' | 'kneel';
 export type OffPlayId = ScrimmagePlayId | SpecialPlayId;
 
 export const DEF_PLAYS = ['man', 'zone', 'blitz', 'runStop', 'prevent'] as const;
@@ -80,7 +108,19 @@ export interface DefenseCall {
 }
 
 export function isSpecial(play: OffPlayId): play is SpecialPlayId {
-  return play === 'punt' || play === 'fieldGoal';
+  return isKick(play) || play === 'kneel';
+}
+
+function isKick(play: OffPlayId): boolean {
+  return play === 'punt' || play === 'fieldGoal' || play === 'extraPoint';
+}
+
+/** Where the ball is snapped from: the yard line and how far off-center (between the hashes). */
+export interface Scrimmage {
+  /** Yards from the offense's own goal line. */
+  y: number;
+  /** Across the field; within ±HASH_X. */
+  x: number;
 }
 
 export function isRunPlay(play: OffPlayId): boolean {
@@ -112,9 +152,12 @@ export type PlayEvent = { t: number } & (
   | { type: 'safety' }
   | { type: 'kick'; chance: number; distance: number }
   | { type: 'punt'; distance: number }
+  | { type: 'kickoff'; touchback: boolean }
+  | { type: 'return'; yards: number }
+  | { type: 'kneel' }
 );
 
-export type OutcomeKind =
+type OutcomeKind =
   | 'tackle'
   | 'outOfBounds'
   | 'touchdown'
@@ -125,12 +168,19 @@ export type OutcomeKind =
   | 'safety'
   | 'punt'
   | 'fieldGoalGood'
-  | 'fieldGoalMiss';
+  | 'fieldGoalMiss'
+  /** The kickoff is over: `spot` is where the receiving team is down (kicking team's frame). */
+  | 'kickoff'
+  | 'kickReturnTouchdown'
+  /** An interception run all the way back. */
+  | 'defensiveTouchdown';
 
 export interface PlayOutcome {
   kind: OutcomeKind;
   /** Where the ball ended up (offense frame). */
   spot: number;
+  /** …and how far off-center (not yet clamped to the hashes). */
+  spotX: number;
   /** Seconds the play took. */
   duration: number;
   /** Incompletions, out of bounds, scores and changes of possession stop the clock. */
